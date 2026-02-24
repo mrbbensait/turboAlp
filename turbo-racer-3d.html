@@ -604,6 +604,65 @@
         const cameraLookTarget = new THREE.Vector3(0, 1.2, -20);
         const LANE_WIDTH = 4;
         const LANE_POSITIONS = [-LANE_WIDTH, 0, LANE_WIDTH];
+        let qualitySettings = null;
+        const perfWatch = {
+            warmup: 0,
+            elapsed: 0,
+            frames: 0,
+            degraded: false
+        };
+
+        function detectQualitySettings() {
+            const cores = navigator.hardwareConcurrency || 8;
+            const memory = navigator.deviceMemory || 8;
+
+            if (cores <= 2 || memory <= 2) {
+                return { tier: "low", pixelRatioCap: 1.0, bloom: false, shadows: false, roadsideDensity: 0.62 };
+            }
+            if (cores <= 4 || memory <= 4) {
+                return { tier: "medium", pixelRatioCap: 1.3, bloom: true, shadows: false, roadsideDensity: 0.78 };
+            }
+            return { tier: "high", pixelRatioCap: 2.0, bloom: true, shadows: true, roadsideDensity: 1.0 };
+        }
+
+        function createSkyDome() {
+            const skyGeometry = new THREE.SphereGeometry(240, 24, 18);
+            const skyMaterial = new THREE.ShaderMaterial({
+                side: THREE.BackSide,
+                depthWrite: false,
+                uniforms: {
+                    topColor: { value: new THREE.Color(0x63b1ff) },
+                    bottomColor: { value: new THREE.Color(0xe9f7ff) },
+                    offset: { value: 33 },
+                    exponent: { value: 0.82 }
+                },
+                vertexShader: `
+                    varying vec3 vWorldPosition;
+                    void main() {
+                        vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                        vWorldPosition = worldPosition.xyz;
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform vec3 topColor;
+                    uniform vec3 bottomColor;
+                    uniform float offset;
+                    uniform float exponent;
+                    varying vec3 vWorldPosition;
+
+                    void main() {
+                        float h = normalize(vWorldPosition + offset).y;
+                        float mixRatio = max(pow(max(h, 0.0), exponent), 0.0);
+                        gl_FragColor = vec4(mix(bottomColor, topColor, mixRatio), 1.0);
+                    }
+                `
+            });
+
+            const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+            sky.position.y = -8;
+            scene.add(sky);
+        }
 
         function makeAsphaltTextures() {
             const size = 256;
@@ -702,9 +761,11 @@
         }
 
         function initThreeJS() {
+            qualitySettings = detectQualitySettings();
             scene = new THREE.Scene();
-            scene.fog = new THREE.Fog(0x050a0f, 30, 200);
-            scene.background = new THREE.Color(0x0b1220);
+            scene.fog = new THREE.Fog(0xc9e9ff, 82, 270);
+            scene.background = new THREE.Color(0xa8dbff);
+            createSkyDome();
 
             camera = new THREE.PerspectiveCamera(75, canvas.clientWidth / canvas.clientHeight, 0.1, 300);
             camera.position.set(0, 6, 10);
@@ -712,8 +773,8 @@
 
             renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
             renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-            renderer.shadowMap.enabled = true;
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, qualitySettings.pixelRatioCap));
+            renderer.shadowMap.enabled = qualitySettings.shadows;
             renderer.shadowMap.type = THREE.PCFSoftShadowMap;
             renderer.outputColorSpace = THREE.SRGBColorSpace;
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -721,28 +782,30 @@
 
             composer = new EffectComposer(renderer);
             composer.addPass(new RenderPass(scene, camera));
-            bloomPass = new UnrealBloomPass(
-                new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
-                0.72,
-                0.52,
-                0.83
-            );
-            composer.addPass(bloomPass);
+            if (qualitySettings.bloom) {
+                bloomPass = new UnrealBloomPass(
+                    new THREE.Vector2(canvas.clientWidth, canvas.clientHeight),
+                    0.72,
+                    0.52,
+                    0.83
+                );
+                composer.addPass(bloomPass);
+            }
             applyVisualPreset(state.visualPreset);
 
-            const ambientLight = new THREE.AmbientLight(0x6699cc, 0.4);
+            const ambientLight = new THREE.AmbientLight(0xd7e9ff, 0.65);
             scene.add(ambientLight);
 
-            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
-            dirLight.position.set(5, 15, 10);
-            dirLight.castShadow = true;
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.05);
+            dirLight.position.set(12, 20, 10);
+            dirLight.castShadow = qualitySettings.shadows;
             dirLight.shadow.camera.left = -50;
             dirLight.shadow.camera.right = 50;
             dirLight.shadow.camera.top = 50;
             dirLight.shadow.camera.bottom = -50;
             scene.add(dirLight);
 
-            const hemiLight = new THREE.HemisphereLight(0x00d4ff, 0x1a212f, 0.3);
+            const hemiLight = new THREE.HemisphereLight(0x8fd4ff, 0x6f7f4d, 0.55);
             scene.add(hemiLight);
 
             createRoad();
@@ -752,6 +815,7 @@
         function createRoad() {
             const roadWidth = 14;
             const roadLength = 400;
+            const density = qualitySettings ? qualitySettings.roadsideDensity : 1;
             const { roughnessMap, normalMap } = makeAsphaltTextures();
             
             const roadGeometry = new THREE.PlaneGeometry(roadWidth, roadLength, 1, 20);
@@ -814,7 +878,7 @@
                 metalness: 0.7,
                 roughness: 0.25
             });
-            const poleCountPerSide = 26;
+            const poleCountPerSide = Math.max(14, Math.floor(26 * density));
             const totalPoles = poleCountPerSide * 2;
             roadsidePoleMesh = new THREE.InstancedMesh(poleGeometry, poleMaterial, totalPoles);
             roadsidePoleMesh.castShadow = true;
@@ -848,7 +912,7 @@
                 side: THREE.DoubleSide,
                 depthWrite: false
             });
-            const fencePerSide = 68;
+            const fencePerSide = Math.max(36, Math.floor(68 * density));
             const totalFences = fencePerSide * 2;
             roadsideFenceMesh = new THREE.InstancedMesh(fenceGeometry, fenceMaterial, totalFences);
             roadsideFences = [];
@@ -874,7 +938,7 @@
                 roughness: 0.35,
                 metalness: 0.45
             });
-            const barrierPerSide = 74;
+            const barrierPerSide = Math.max(40, Math.floor(74 * density));
             const totalBarriers = barrierPerSide * 2;
             roadsideBarrierMesh = new THREE.InstancedMesh(barrierGeometry, barrierMaterial, totalBarriers);
             roadsideBarrierMesh.castShadow = true;
@@ -939,6 +1003,36 @@
                 }
                 roadsideBarrierMesh.instanceMatrix.needsUpdate = true;
             }
+        }
+
+        function maybeDowngradeQuality(dt) {
+            if (perfWatch.degraded || !renderer || !composer) return;
+
+            perfWatch.warmup += dt;
+            if (perfWatch.warmup < 6) return;
+
+            perfWatch.elapsed += dt;
+            perfWatch.frames += 1;
+
+            if (perfWatch.elapsed < 2.2) return;
+
+            const fps = perfWatch.frames / perfWatch.elapsed;
+            perfWatch.elapsed = 0;
+            perfWatch.frames = 0;
+
+            if (fps >= 42) return;
+
+            perfWatch.degraded = true;
+            renderer.setPixelRatio(1);
+            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+            composer.setSize(canvas.clientWidth, canvas.clientHeight);
+            renderer.shadowMap.enabled = false;
+
+            if (bloomPass) {
+                bloomPass.enabled = false;
+            }
+
+            showToast("Performans modu aktif: kalite otomatik düşürüldü");
         }
 
         function createPlayerCar() {
@@ -1674,6 +1768,7 @@
 
             update(dt);
             renderHud();
+            maybeDowngradeQuality(dt);
 
             if (state.scene === "playing") {
                 const playerX = state.player.mesh.position.x;
